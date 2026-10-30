@@ -3,9 +3,12 @@ name: Windows Build
 on:
   workflow_dispatch:
 
+# Vulkan GPU build (works on NVIDIA, AMD and Intel GPUs). Mirrors the Windows
+# Vulkan job in release.yml, but builds every target and uploads an artifact
+# instead of attaching to a release.
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     steps:
     - name: Checkout Code
@@ -13,20 +16,52 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Configure CMake
-      run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+    - name: MSVC dev shell
+      uses: ilammy/msvc-dev-cmd@v1
 
-    - name: Build Project
-      run: cmake --build build --config Release -j 2
+    - name: Ninja
+      uses: seanmiddleditch/gha-setup-ninja@v5
 
-    # llama.cpp/ggml DLLs land in build/bin/Release; the executables need them
-    # in the same directory to start.
-    - name: Collect runtime DLLs
-      shell: pwsh
-      run: Copy-Item build/bin/Release/*.dll build/Release/
+    - name: Vulkan SDK
+      uses: jakoch/install-vulkan-sdk-action@v1
+      with:
+        vulkan_version: 1.4.309.0
+        install_runtime: true
+        cache: true
+
+    - name: SPIRV-Headers
+      shell: bash
+      run: |
+        set -e
+        git clone --depth 1 --branch vulkan-sdk-1.4.309.0 https://github.com/KhronosGroup/SPIRV-Headers \
+          || git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers
+        cmake -S SPIRV-Headers -B SPIRV-Headers/build -DCMAKE_INSTALL_PREFIX="$PWD/spirv-headers-install"
+        cmake --build SPIRV-Headers/build --target install --config Release
+        echo "SPIRV_HEADERS_ROOT=$(cygpath -m "$PWD/spirv-headers-install")" >> "$GITHUB_ENV"
+
+    - name: Configure & build
+      shell: bash
+      run: |
+        set -e
+        cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          -DGGML_VULKAN=ON -DGGML_OPENMP=OFF \
+          -DCMAKE_PREFIX_PATH="$SPIRV_HEADERS_ROOT"
+        cmake --build build -j
+
+    # Executables land in build/, the llama.cpp/ggml DLLs in build/bin/;
+    # flatten them into one folder so the exes find their DLLs.
+    - name: Package
+      shell: bash
+      run: |
+        set -e
+        mkdir -p dist
+        cp build/*.exe dist/
+        cp build/bin/*.dll dist/
+        cp -r build/webui dist/webui 2>/dev/null || true
+        ls -la dist
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: openmoss-windows-x64
-        path: build/Release/
+        name: openmoss-windows-vulkan-x64
+        path: dist/
