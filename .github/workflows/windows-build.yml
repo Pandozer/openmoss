@@ -3,12 +3,18 @@ name: Windows Build
 on:
   workflow_dispatch:
 
-# Vulkan GPU build (works on NVIDIA, AMD and Intel GPUs). Mirrors the Windows
-# Vulkan job in release.yml, but builds every target and uploads an artifact
-# instead of attaching to a release.
+# GPU builds for Windows. Mirrors the Windows jobs in release.yml, but builds
+# every target and uploads artifacts instead of attaching to a release.
+#   vulkan: any NVIDIA / AMD / Intel GPU
+#   cuda:   NVIDIA only, built for Blackwell (RTX 50xx, sm_120)
 jobs:
   build:
+    name: windows · ${{ matrix.backend }}
     runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [cuda, vulkan]
 
     steps:
     - name: Checkout Code
@@ -23,6 +29,7 @@ jobs:
       uses: seanmiddleditch/gha-setup-ninja@v5
 
     - name: Vulkan SDK
+      if: matrix.backend == 'vulkan'
       uses: jakoch/install-vulkan-sdk-action@v1
       with:
         vulkan_version: 1.4.309.0
@@ -30,6 +37,7 @@ jobs:
         cache: true
 
     - name: SPIRV-Headers
+      if: matrix.backend == 'vulkan'
       shell: bash
       run: |
         set -e
@@ -39,13 +47,23 @@ jobs:
         cmake --build SPIRV-Headers/build --target install --config Release
         echo "SPIRV_HEADERS_ROOT=$(cygpath -m "$PWD/spirv-headers-install")" >> "$GITHUB_ENV"
 
+    - name: CUDA toolkit
+      if: matrix.backend == 'cuda'
+      uses: Jimver/cuda-toolkit@v0.2.30
+      with:
+        method: network
+
     - name: Configure & build
       shell: bash
       run: |
         set -e
-        cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-          -DGGML_VULKAN=ON -DGGML_OPENMP=OFF \
-          -DCMAKE_PREFIX_PATH="$SPIRV_HEADERS_ROOT"
+        case "${{ matrix.backend }}" in
+          vulkan) FLAGS="-DGGML_VULKAN=ON" ;;
+          # ggml rewrites 120 -> 120a; add more archs (e.g. 86;89) for older cards.
+          cuda)   FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120" ;;
+        esac
+        cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release $FLAGS -DGGML_OPENMP=OFF \
+          ${SPIRV_HEADERS_ROOT:+-DCMAKE_PREFIX_PATH=$SPIRV_HEADERS_ROOT}
         cmake --build build -j
 
     # Executables land in build/, the llama.cpp/ggml DLLs in build/bin/;
@@ -58,10 +76,20 @@ jobs:
         cp build/*.exe dist/
         cp build/bin/*.dll dist/
         cp -r build/webui dist/webui 2>/dev/null || true
+        if [ "${{ matrix.backend }}" = "cuda" ]; then
+          # Bundle the CUDA runtime so no toolkit install is needed. CUDA 13
+          # moved these DLLs out of bin/, so search the whole toolkit.
+          cuda_root="$(cygpath -u "$CUDA_PATH")"
+          for dll in cudart64 cublas64 cublasLt64; do
+            src="$(find "$cuda_root" -type f -name "${dll}_*.dll" -print -quit)"
+            if [ -z "$src" ]; then echo "ERROR: ${dll}_*.dll not found under CUDA toolkit"; exit 1; fi
+            cp "$src" dist/
+          done
+        fi
         ls -la dist
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: openmoss-windows-vulkan-x64
+        name: openmoss-windows-${{ matrix.backend }}-x64
         path: dist/
