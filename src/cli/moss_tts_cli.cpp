@@ -265,7 +265,13 @@ int main(int argc, char ** argv) {
 
     // Must precede Model::load: the Vulkan backend reads this when it
     // initialises the device, which happens during the load.
-    if (a.vk_f32) setenv("GGML_VK_DISABLE_F16", "1", /*overwrite=*/0);
+    if (a.vk_f32) {
+#if defined(_WIN32)
+        if (!std::getenv("GGML_VK_DISABLE_F16")) _putenv_s("GGML_VK_DISABLE_F16", "1");
+#else
+        setenv("GGML_VK_DISABLE_F16", "1", /*overwrite=*/0);
+#endif
+    }
 
     openmoss::LoadOptions lo;
     lo.n_gpu_layers = a.n_gpu_layers;
